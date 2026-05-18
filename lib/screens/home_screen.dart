@@ -1,20 +1,44 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../score_service.dart';
-import 'dart:math' as math;
 import 'game_screen.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final bestScore = ScoreService.getBestScore();
+  State<HomeScreen> createState() => _HomeScreenState();
+}
 
+class _HomeScreenState extends State<HomeScreen> {
+  int _bestScore = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBestScore();
+  }
+
+  // Called on first load AND every time user returns from game screen
+  void _loadBestScore() {
+    setState(() {
+      _bestScore = ScoreService.getBestScore();
+    });
+  }
+
+  void _openGame() {
+    Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => const GameScreen()))
+        .then((_) => _loadBestScore()); // ← reload score when game closes
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF060612),
       body: Stack(
         children: [
-          // Starfield background (CSS-like gradient)
+          // Background gradient
           Container(
             decoration: const BoxDecoration(
               gradient: RadialGradient(
@@ -25,7 +49,7 @@ class HomeScreen extends StatelessWidget {
             ),
           ),
 
-          // Animated orbit illustration (simple circles)
+          // Animated orbit illustration
           const Positioned.fill(child: _OrbitIllustration()),
 
           // Content
@@ -56,12 +80,12 @@ class HomeScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: 24),
                     const Text(
-                      'VOIDLEAP',
+                      'VOIDLOOP',
                       style: TextStyle(
                         color: Colors.white,
-                        fontSize: 48,
+                        fontSize: 38,
                         fontWeight: FontWeight.w900,
-                        letterSpacing: 12,
+                        letterSpacing: 8,
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -79,8 +103,8 @@ class HomeScreen extends StatelessWidget {
 
                 const Spacer(flex: 2),
 
-                // Best score
-                if (bestScore > 0) ...[
+                // Best score — uses _bestScore from state, updates immediately
+                if (_bestScore > 0) ...[
                   Text(
                     'BEST SCORE',
                     style: TextStyle(
@@ -92,7 +116,7 @@ class HomeScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    '$bestScore',
+                    '$_bestScore',
                     style: const TextStyle(
                       color: Color(0xFF00E5FF),
                       fontSize: 36,
@@ -103,13 +127,9 @@ class HomeScreen extends StatelessWidget {
                   const SizedBox(height: 32),
                 ],
 
-                // Play button
+                // Play button — uses _openGame() which reloads score on return
                 GestureDetector(
-                  onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => const GameScreen()),
-                    );
-                  },
+                  onTap: _openGame,
                   child: Container(
                     width: 200,
                     height: 60,
@@ -177,6 +197,8 @@ class HomeScreen extends StatelessWidget {
   }
 }
 
+// ─── Instruction row ────────────────────────────────────────────────────────
+
 class _Instruction extends StatelessWidget {
   final IconData icon;
   final String text;
@@ -202,6 +224,8 @@ class _Instruction extends StatelessWidget {
     );
   }
 }
+
+// ─── Animated orbit illustration ────────────────────────────────────────────
 
 class _OrbitIllustration extends StatefulWidget {
   const _OrbitIllustration();
@@ -248,16 +272,6 @@ class _OrbitPainter extends CustomPainter {
     final cx = size.width / 2;
     final cy = size.height * 0.38;
 
-    // Orbit ring
-    canvas.drawCircle(
-      Offset(cx, cy),
-      80,
-      Paint()
-        ..color = Colors.white.withOpacity(0.06)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1,
-    );
-
     // Outer ring
     canvas.drawCircle(
       Offset(cx, cy),
@@ -268,49 +282,48 @@ class _OrbitPainter extends CustomPainter {
         ..strokeWidth = 1,
     );
 
-    // Planet
+    // Inner ring
     canvas.drawCircle(
       Offset(cx, cy),
-      18,
+      80,
       Paint()
-        ..color = const Color(0xFF7C4DFF).withOpacity(0.6)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
+        ..color = Colors.white.withOpacity(0.06)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
     );
+
+    // Planet
     canvas.drawCircle(
       Offset(cx, cy),
       14,
       Paint()..color = const Color(0xFF7C4DFF),
     );
-
-    // Orbiting dot
-    final angle = t * 2 * 3.14159;
-    final dotX = cx + 80 * (cos(angle) as double);
-    final dotY = cy + 80 * (sin(angle) as double);
     canvas.drawCircle(
-      Offset(dotX, dotY),
-      7,
+      Offset(cx, cy),
+      18,
       Paint()
-        ..color = const Color(0xFF00E5FF).withOpacity(0.7)
+        ..color = const Color(0xFF7C4DFF).withOpacity(0.3)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8),
     );
+
+    // Orbiting player dot
+    final angle = t * 2 * math.pi;
+    final dotX = cx + 80 * math.cos(angle);
+    final dotY = cy + 80 * math.sin(angle);
     canvas.drawCircle(
       Offset(dotX, dotY),
       5,
       Paint()..color = const Color(0xFF00E5FF),
     );
+    canvas.drawCircle(
+      Offset(dotX, dotY),
+      9,
+      Paint()
+        ..color = const Color(0xFF00E5FF).withOpacity(0.3)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
+    );
   }
 
   @override
   bool shouldRepaint(_OrbitPainter old) => old.t != t;
-}
-
-double cos(double x) => (x.isNaN) ? 0 : _mathCos(x);
-double sin(double x) => (x.isNaN) ? 0 : _mathSin(x);
-
-double _mathCos(double x) {
-  return math.cos(x);
-}
-
-double _mathSin(double x) {
-  return math.sin(x);
 }

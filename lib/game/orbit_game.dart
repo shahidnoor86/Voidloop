@@ -13,6 +13,8 @@ import 'components/asteroid_component.dart';
 import 'components/planet_component.dart';
 import 'components/player_component.dart';
 import 'components/power_bar_component.dart';
+import 'components/powerup_component.dart';
+import 'components/powerup_hud_component.dart';
 
 enum GamePhase { playing, paused, gameOver }
 
@@ -20,7 +22,7 @@ class OrbitGame extends FlameGame with TapCallbacks {
   static const String pauseOverlay = 'PauseOverlay';
   static const String gameOverOverlay = 'GameOverOverlay';
 
-  // ── State ──────────────────────────────────────────────────
+  // State
   GamePhase phase = GamePhase.playing;
   int score = 0;
   int bestScore = 0;
@@ -28,31 +30,35 @@ class OrbitGame extends FlameGame with TapCallbacks {
   int _highestOrbitReached = 0;
   int _totalPlanetsSpawned = 0;
 
-  // ── Core components ────────────────────────────────────────
+  // Core components
   late final World _world;
   late final CameraComponent _camera;
   late final PlayerComponent _player;
   late final PowerBarComponent _powerBar;
   late final HudComponent _hud;
+  late final PowerupHudComponent _powerupHud;
 
-  // ── Level objects ──────────────────────────────────────────
+  // Level objects
   final List<PlanetComponent> _planets = [];
-  final List<ObstacleComponent> _obstacles = []; // red sphere orbiters
-  final List<AsteroidComponent> _asteroids = []; // rocky asteroids
+  final List<ObstacleComponent> _obstacles = [];
+  final List<AsteroidComponent> _asteroids = [];
   final List<BlackHoleComponent> _blackHoles = [];
+  final List<PowerupComponent> _powerups = [];
 
   final Random _rng = Random();
   double _worldWidth = 0;
   double _highestPlanetY = 0;
 
-  // ── Input ──────────────────────────────────────────────────
+  // Input
   bool _isTapping = false;
 
-  // ── Death timer ────────────────────────────────────────────
+  // Death
   double _deathTimer = 0;
   static const double _deathDelay = 1.2;
 
-  // ─────────────────────────────────────────────────────────────
+  // Extra-life guard
+  bool _revivedThisRun = false;
+
   @override
   Color backgroundColor() => GameConstants.bgColor;
 
@@ -65,7 +71,6 @@ class OrbitGame extends FlameGame with TapCallbacks {
     _camera = CameraComponent(world: _world)..viewfinder.anchor = Anchor.center;
     addAll([_world, _camera]);
 
-    // Starfield background (tall enough to never run out)
     _world.add(
       BackgroundComponent(worldSize: Vector2(_worldWidth, size.y * 60)),
     );
@@ -79,20 +84,21 @@ class OrbitGame extends FlameGame with TapCallbacks {
     _player.position = start.position + Vector2(start.orbitRadius, 0);
     _player.snapToPlanet(start);
 
-    // Camera follows player (maxSpeed keeps it smooth during play)
     _camera.follow(_player, maxSpeed: 280);
 
-    // Power bar (viewport = screen space)
     _powerBar = PowerBarComponent(position: Vector2(size.x - 38, size.y / 2));
     _camera.viewport.add(_powerBar);
 
     _hud = HudComponent(screenSize: size);
     _camera.viewport.add(_hud);
 
+    _powerupHud = PowerupHudComponent(screenSize: size);
+    _camera.viewport.add(_powerupHud);
+
     _hud.updateScore(score, bestScore, _currentLevel());
   }
 
-  // ── Level generation ────────────────────────────────────────
+  // ── Level generation ─────────────────────────────────────────
 
   void _generateInitialLevel() {
     var lastPos = Vector2(_worldWidth / 2, size.y * 0.72);
@@ -106,6 +112,7 @@ class OrbitGame extends FlameGame with TapCallbacks {
   void _spawnPlanet(Vector2 below) {
     final index = _totalPlanetsSpawned;
     _totalPlanetsSpawned++;
+
     final spacing =
         (GameConstants.basePlanetSpacing +
                 index * GameConstants.spacingIncreasePerLevel)
@@ -114,8 +121,7 @@ class OrbitGame extends FlameGame with TapCallbacks {
               GameConstants.maxPlanetSpacing,
             );
 
-    final maxDx = _worldWidth * 0.35;
-    final dx = (_rng.nextDouble() * 2 - 1) * maxDx;
+    final dx = (_rng.nextDouble() * 2 - 1) * _worldWidth * 0.35;
     final newX = (below.x + dx).clamp(85.0, _worldWidth - 85.0);
     final newY = below.y - spacing;
 
@@ -140,31 +146,27 @@ class OrbitGame extends FlameGame with TapCallbacks {
     _planets.add(planet);
     _world.add(planet);
 
-    // Orbiting obstacles (red spheres + asteroids) around this planet
     if (index >= GameConstants.obstacleStartOrbit) {
       _spawnOrbitingObstacles(planet, index);
     }
-
-    // Drifting asteroids in the gap between this and previous planet
     if (index >= 3) {
       _spawnDriftingAsteroids(below, Vector2(newX, newY), index);
     }
-
-    // Black hole in the gap
     if (index >= GameConstants.blackHoleStartOrbit &&
         _rng.nextDouble() < 0.45) {
       _spawnBlackHoleBetween(below, Vector2(newX, newY));
     }
+    if (index >= 1) {
+      _spawnPowerupsBetween(below, Vector2(newX, newY), index);
+    }
   }
 
-  /// Spawns a mix of red-sphere orbiters AND orbiting asteroids around [planet].
   void _spawnOrbitingObstacles(PlanetComponent planet, int level) {
-    final multiLevel = level >= GameConstants.multiObstacleStartOrbit;
-    final totalCount = multiLevel
-        ? (_rng.nextInt(2) + 2)
-        : (_rng.nextInt(2) + 1);
+    final count = (level >= GameConstants.multiObstacleStartOrbit)
+        ? _rng.nextInt(2) + 2
+        : _rng.nextInt(2) + 1;
 
-    for (int i = 0; i < totalCount; i++) {
+    for (int i = 0; i < count; i++) {
       final speed =
           GameConstants.obstacleOrbitSpeedMin +
           _rng.nextDouble() *
@@ -173,7 +175,6 @@ class OrbitGame extends FlameGame with TapCallbacks {
       final startAngle = _rng.nextDouble() * 2 * pi;
       final cw = _rng.nextBool();
 
-      // Alternate between red sphere and asteroid
       if (i % 2 == 0) {
         final obs = ObstacleComponent(
           planet: planet,
@@ -196,7 +197,6 @@ class OrbitGame extends FlameGame with TapCallbacks {
       }
     }
 
-    // Extra asteroid on a slightly different orbit radius for variety
     if (level >= 5 && _rng.nextDouble() < 0.6) {
       final innerR = planet.orbitRadius * (_rng.nextBool() ? 0.75 : 1.25);
       final ast = AsteroidComponent.orbiting(
@@ -212,33 +212,24 @@ class OrbitGame extends FlameGame with TapCallbacks {
     }
   }
 
-  /// Spawns slow-drifting asteroids floating freely in the gap between planets.
   void _spawnDriftingAsteroids(Vector2 from, Vector2 to, int level) {
-    // Number of drifting asteroids grows with level
-    final count = (_rng.nextInt(2) + (level >= 6 ? 2 : 1));
-
+    final count = _rng.nextInt(2) + (level >= 6 ? 2 : 1);
     for (int i = 0; i < count; i++) {
-      // Random position between the two planets
       final t = 0.25 + _rng.nextDouble() * 0.5;
       final midX =
           from.x +
           (to.x - from.x) * t +
           (_rng.nextDouble() * 2 - 1) * _worldWidth * 0.28;
       final midY = from.y + (to.y - from.y) * t;
-
-      // Keep within screen bounds
-      final clampedX = midX.clamp(40.0, _worldWidth - 40.0);
-
-      // Slow horizontal drift
-      final driftX = (_rng.nextDouble() * 2 - 1) * 28;
-      final driftY = (_rng.nextDouble() * 2 - 1) * 12;
-
-      final size = 9.0 + _rng.nextDouble() * 10.0;
+      final cx = midX.clamp(40.0, _worldWidth - 40.0);
 
       final ast = AsteroidComponent.drifting(
-        position: Vector2(clampedX, midY),
-        drift: Vector2(driftX, driftY),
-        size: size,
+        position: Vector2(cx, midY),
+        drift: Vector2(
+          (_rng.nextDouble() * 2 - 1) * 28,
+          (_rng.nextDouble() * 2 - 1) * 12,
+        ),
+        size: 9.0 + _rng.nextDouble() * 10.0,
         seed: _rng.nextInt(9999),
       );
       _asteroids.add(ast);
@@ -254,22 +245,57 @@ class OrbitGame extends FlameGame with TapCallbacks {
     _world.add(bh);
   }
 
+  // ── Power-up spawning ─────────────────────────────────────────
+
+  void _spawnPowerupsBetween(Vector2 from, Vector2 to, int levelIndex) {
+    if (_rng.nextDouble() > 0.65) return;
+
+    final count = (levelIndex >= 8 && _rng.nextDouble() < 0.4) ? 2 : 1;
+
+    for (int i = 0; i < count; i++) {
+      final t = 0.3 + _rng.nextDouble() * 0.4;
+      final midX =
+          from.x + (to.x - from.x) * t + (_rng.nextDouble() * 2 - 1) * 30;
+      final midY = from.y + (to.y - from.y) * t;
+      final cx = midX.clamp(40.0, _worldWidth - 40.0);
+
+      final type = _pickPowerupType(levelIndex);
+      final powerup = PowerupComponent(position: Vector2(cx, midY), type: type);
+      _powerups.add(powerup);
+      _world.add(powerup);
+    }
+  }
+
+  PowerupType _pickPowerupType(int level) {
+    final roll = _rng.nextDouble();
+    if (level <= 4) {
+      if (roll < 0.60) return PowerupType.extraPoints;
+      if (roll < 0.85) return PowerupType.stoneCrasher;
+      return PowerupType.extraLife;
+    } else if (level <= 8) {
+      if (roll < 0.35) return PowerupType.extraPoints;
+      if (roll < 0.70) return PowerupType.stoneCrasher;
+      return PowerupType.extraLife;
+    } else {
+      if (roll < 0.25) return PowerupType.extraPoints;
+      if (roll < 0.55) return PowerupType.stoneCrasher;
+      return PowerupType.extraLife;
+    }
+  }
+
   int _currentLevel() => (orbitsCompleted / 5).floor() + 1;
 
-  // ── Input ────────────────────────────────────────────────────
+  // ── Input ─────────────────────────────────────────────────────
 
   @override
   void onTapDown(TapDownEvent event) {
     if (phase != GamePhase.playing) return;
     if (_player.isDead) return;
-
-    // Pause button (top-right corner)
     final pos = event.localPosition;
     if (pos.x > size.x - 70 && pos.y < 100) {
       pauseGame();
       return;
     }
-
     _isTapping = true;
     _powerBar.show();
     _player.startAiming();
@@ -292,7 +318,7 @@ class OrbitGame extends FlameGame with TapCallbacks {
     _player.launch(_powerBar.currentPower);
   }
 
-  // ── Pause / Resume ───────────────────────────────────────────
+  // ── Pause / Resume ────────────────────────────────────────────
 
   void pauseGame() {
     if (phase != GamePhase.playing) return;
@@ -307,21 +333,23 @@ class OrbitGame extends FlameGame with TapCallbacks {
     resumeEngine();
   }
 
-  // ── Restart ──────────────────────────────────────────────────
+  // ── Restart ───────────────────────────────────────────────────
 
   void restartGame() {
     overlays.remove(pauseOverlay);
     overlays.remove(gameOverOverlay);
 
-    // Clear all level objects
     for (final p in _planets) p.removeFromParent();
     for (final o in _obstacles) o.removeFromParent();
     for (final a in _asteroids) a.removeFromParent();
     for (final b in _blackHoles) b.removeFromParent();
+    for (final p in _powerups) p.removeFromParent();
     _planets.clear();
     _obstacles.clear();
     _asteroids.clear();
     _blackHoles.clear();
+    _powerups.clear();
+    _powerupHud.activePowerups.clear();
 
     score = 0;
     orbitsCompleted = 0;
@@ -329,62 +357,65 @@ class OrbitGame extends FlameGame with TapCallbacks {
     _totalPlanetsSpawned = 0;
     _deathTimer = 0;
     _isTapping = false;
+    _revivedThisRun = false;
     phase = GamePhase.playing;
 
     _generateInitialLevel();
 
-    // Reset player
     final start = _planets.first;
     _player.position = start.position + Vector2(start.orbitRadius, 0);
     _player.state = PlayerState.orbiting;
     _player.velocity = Vector2.zero();
     _player.snapToPlanet(start);
 
-    // ── FIX: snap camera instantly to player's new position ──
-    // Stop smooth-follow, teleport, then re-attach follow.
     _camera.stop();
     _camera.viewfinder.position = _player.position;
     _camera.follow(_player, maxSpeed: 280);
 
     _powerBar.hide();
     _hud.updateScore(score, bestScore, _currentLevel());
-
     resumeEngine();
   }
 
-  // ── Update loop ──────────────────────────────────────────────
+  // ── Update loop ───────────────────────────────────────────────
 
   @override
   void update(double dt) {
     super.update(dt);
     if (phase != GamePhase.playing) return;
 
-    // Live preview while holding
-    if (_isTapping) {
-      _player.updateAiming(_powerBar.currentPower);
-    }
+    if (_isTapping) _player.updateAiming(_powerBar.currentPower);
 
     if (_player.state == PlayerState.flying) {
-      // Black hole gravity
       _player.applyBlackHoleGravity(_blackHoles, dt);
 
-      // Black hole destruction
+      // Black hole — no power-up saves this
       if (_player.checkBlackHoleCollision(_blackHoles)) {
         _triggerDeath();
         return;
       }
 
-      // Red sphere obstacle collision
+      // Red sphere obstacles
       if (_player.checkObstacleCollision(_obstacles)) {
         _triggerDeath();
         return;
       }
 
-      // Asteroid collision
-      if (_checkAsteroidCollision()) {
-        _triggerDeath();
-        return;
+      // Asteroid — Stone Crasher intercepts
+      final hitAsteroid = _findCollidingAsteroid();
+      if (hitAsteroid != null) {
+        if (_powerupHud.consumePowerup(PowerupType.stoneCrasher)) {
+          _asteroids.remove(hitAsteroid);
+          hitAsteroid.removeFromParent();
+          _addScore(50 * _currentLevel());
+        } else {
+          _triggerDeath();
+          return;
+        }
       }
+
+      // Collect power-ups
+      _checkPowerupCollection();
 
       // Planet capture
       PlanetComponent? captured;
@@ -398,39 +429,85 @@ class OrbitGame extends FlameGame with TapCallbacks {
       }
       if (captured != null) {
         _player.snapToPlanet(captured);
-        _onOrbitComplete(captured); // ← pass the planet
+        _onOrbitComplete(captured);
       }
 
-      // Out of bounds
       if (_isPlayerOffScreen()) {
         _triggerDeath();
         return;
       }
     }
 
-    // Death delay before game-over overlay
+    // Death countdown — Extra Life intercepts before game over
     if (_player.isDead) {
       _deathTimer += dt;
+
+      if (_deathTimer >= _deathDelay * 0.5 && !_revivedThisRun) {
+        if (_powerupHud.consumePowerup(PowerupType.extraLife)) {
+          _revivePlayer();
+          return;
+        }
+      }
+
       if (_deathTimer >= _deathDelay) {
         _showGameOver();
       }
       return;
     }
 
-    // Expand level as player ascends
-    if (_player.position.y < _highestPlanetY + 700) {
-      _expandLevel();
-    }
-
-    // Remove far-below components
+    if (_player.position.y < _highestPlanetY + 700) _expandLevel();
     _cleanupOldComponents();
   }
 
-  bool _checkAsteroidCollision() {
-    for (final ast in _asteroids) {
-      if (ast.collidesWithPoint(_player.position)) return true;
+  // ── Power-up collection ───────────────────────────────────────
+
+  void _checkPowerupCollection() {
+    final toRemove = <PowerupComponent>[];
+    for (final powerup in _powerups) {
+      if (powerup.collected) continue;
+      if (powerup.collidesWithPlayer(_player.position)) {
+        powerup.collected = true;
+        toRemove.add(powerup);
+        _applyPowerup(powerup.type);
+      }
     }
-    return false;
+    for (final p in toRemove) {
+      _powerups.remove(p);
+      p.removeFromParent();
+    }
+  }
+
+  void _applyPowerup(PowerupType type) {
+    switch (type) {
+      case PowerupType.extraPoints:
+        _addScore(150 * _currentLevel());
+        break;
+      case PowerupType.extraLife:
+      case PowerupType.stoneCrasher:
+        _powerupHud.addPowerup(type);
+        break;
+    }
+  }
+
+  // ── Extra life revival ────────────────────────────────────────
+
+  void _revivePlayer() {
+    _revivedThisRun = true;
+    _deathTimer = 0;
+    final planet = _player.currentPlanet ?? _planets.last;
+    _player.position = planet.position + Vector2(planet.orbitRadius, 0);
+    _player.state = PlayerState.orbiting;
+    _player.velocity = Vector2.zero();
+    _player.snapToPlanet(planet);
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────
+
+  AsteroidComponent? _findCollidingAsteroid() {
+    for (final ast in _asteroids) {
+      if (ast.collidesWithPoint(_player.position)) return ast;
+    }
+    return null;
   }
 
   bool _isPlayerOffScreen() {
@@ -455,22 +532,20 @@ class OrbitGame extends FlameGame with TapCallbacks {
 
   void _onOrbitComplete(PlanetComponent newPlanet) {
     final newIndex = newPlanet.orbitIndex;
-
-    // Going backwards or revisiting — no points
     if (newIndex <= _highestOrbitReached) return;
-
-    // How many orbits were jumped in one shot (bonus for skipping)
     final orbitsAdvanced = newIndex - _highestOrbitReached;
     _highestOrbitReached = newIndex;
-
     orbitsCompleted++;
-    score += GameConstants.pointsPerOrbit * _currentLevel() * orbitsAdvanced;
+    _addScore(GameConstants.pointsPerOrbit * _currentLevel() * orbitsAdvanced);
+  }
+
+  void _addScore(int points) {
+    score += points;
     if (score > bestScore) bestScore = score;
     _hud.updateScore(score, bestScore, _currentLevel());
   }
 
   void _expandLevel() {
-    // final nextIndex = _planets.length;
     _spawnPlanet(_planets.last.position);
     _highestPlanetY = _planets.last.position.y;
   }
@@ -493,11 +568,11 @@ class OrbitGame extends FlameGame with TapCallbacks {
       return false;
     });
     _asteroids.removeWhere((a) {
-      // Remove drifting ones that have gone far off screen too
-      final tooFarDown = a.position.y > cutoff;
-      final tooFarSide =
-          a.position.x < -200 || a.position.x > _worldWidth + 200;
-      if (tooFarDown || tooFarSide) {
+      final gone =
+          a.position.y > cutoff ||
+          a.position.x < -200 ||
+          a.position.x > _worldWidth + 200;
+      if (gone) {
         a.removeFromParent();
         return true;
       }
@@ -510,9 +585,15 @@ class OrbitGame extends FlameGame with TapCallbacks {
       }
       return false;
     });
+    _powerups.removeWhere((p) {
+      if (p.position.y > cutoff) {
+        p.removeFromParent();
+        return true;
+      }
+      return false;
+    });
   }
 
-  // ── Exposed for overlays ─────────────────────────────────────
   int get currentScore => score;
   int get currentBest => bestScore;
 }

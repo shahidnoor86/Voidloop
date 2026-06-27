@@ -15,6 +15,7 @@ import 'components/player_component.dart';
 import 'components/power_bar_component.dart';
 import 'components/powerup_component.dart';
 import 'components/powerup_hud_component.dart';
+import 'components/floating_text_component.dart';
 
 enum GamePhase { playing, paused, gameOver }
 
@@ -22,15 +23,17 @@ class OrbitGame extends FlameGame with TapCallbacks {
   static const String pauseOverlay = 'PauseOverlay';
   static const String gameOverOverlay = 'GameOverOverlay';
 
-  // State
+  // ── State ──────────────────────────────────────────────────
   GamePhase phase = GamePhase.playing;
   int score = 0;
   int bestScore = 0;
   int orbitsCompleted = 0;
   int _highestOrbitReached = 0;
   int _totalPlanetsSpawned = 0;
+  // NOTE: _revivedThisRun removed — consumePowerup() returning false
+  // is the correct guard; the flag was blocking second extra lives.
 
-  // Core components
+  // ── Core components ────────────────────────────────────────
   late final World _world;
   late final CameraComponent _camera;
   late final PlayerComponent _player;
@@ -38,7 +41,7 @@ class OrbitGame extends FlameGame with TapCallbacks {
   late final HudComponent _hud;
   late final PowerupHudComponent _powerupHud;
 
-  // Level objects
+  // ── Level objects ──────────────────────────────────────────
   final List<PlanetComponent> _planets = [];
   final List<ObstacleComponent> _obstacles = [];
   final List<AsteroidComponent> _asteroids = [];
@@ -49,15 +52,16 @@ class OrbitGame extends FlameGame with TapCallbacks {
   double _worldWidth = 0;
   double _highestPlanetY = 0;
 
-  // Input
+  // ── Input ──────────────────────────────────────────────────
   bool _isTapping = false;
 
-  // Death
+  // ── Death ──────────────────────────────────────────────────
   double _deathTimer = 0;
   static const double _deathDelay = 1.2;
 
-  // Extra-life guard
-  bool _revivedThisRun = false;
+  // ── Revival cooldown (prevents double-consume in same frame) ──
+  // Set to true the moment we revive; reset when player orbits next planet.
+  bool _justRevived = false;
 
   @override
   Color backgroundColor() => GameConstants.bgColor;
@@ -246,9 +250,10 @@ class OrbitGame extends FlameGame with TapCallbacks {
   }
 
   // ── Power-up spawning ─────────────────────────────────────────
+  // Spawn chance: 20% per gap (was 65% — reduced by 75%)
 
   void _spawnPowerupsBetween(Vector2 from, Vector2 to, int levelIndex) {
-    if (_rng.nextDouble() > 0.65) return;
+    if (_rng.nextDouble() > 0.20) return; // 20% spawn chance
 
     final count = (levelIndex >= 8 && _rng.nextDouble() < 0.4) ? 2 : 1;
 
@@ -357,7 +362,7 @@ class OrbitGame extends FlameGame with TapCallbacks {
     _totalPlanetsSpawned = 0;
     _deathTimer = 0;
     _isTapping = false;
-    _revivedThisRun = false;
+    _justRevived = false;
     phase = GamePhase.playing;
 
     _generateInitialLevel();
@@ -395,19 +400,27 @@ class OrbitGame extends FlameGame with TapCallbacks {
         return;
       }
 
-      // Red sphere obstacles
+      // Red sphere obstacles — no power-up saves this
       if (_player.checkObstacleCollision(_obstacles)) {
         _triggerDeath();
         return;
       }
 
-      // Asteroid — Stone Crasher intercepts
+      // Asteroid — Stone Crasher intercepts ──────────────────────
       final hitAsteroid = _findCollidingAsteroid();
       if (hitAsteroid != null) {
         if (_powerupHud.consumePowerup(PowerupType.stoneCrasher)) {
+          // Remove the asteroid, player passes through safely
           _asteroids.remove(hitAsteroid);
           hitAsteroid.removeFromParent();
-          _addScore(50 * _currentLevel());
+          final bonus = 50 * _currentLevel();
+          _addScore(bonus);
+          // Feedback: show "ASTEROID CRUSHED!" centre screen
+          _showFloating(
+            'ASTEROID CRUSHED!',
+            const Color(0xFFFF6D00),
+            fontSize: 22,
+          );
         } else {
           _triggerDeath();
           return;
@@ -438,11 +451,13 @@ class OrbitGame extends FlameGame with TapCallbacks {
       }
     }
 
-    // Death countdown — Extra Life intercepts before game over
+    // ── Death countdown ───────────────────────────────────────
+    // Extra Life intercepts at half-way through death animation.
+    // _justRevived prevents double-consuming in the same death event.
     if (_player.isDead) {
       _deathTimer += dt;
 
-      if (_deathTimer >= _deathDelay * 0.5 && !_revivedThisRun) {
+      if (_deathTimer >= _deathDelay * 0.5 && !_justRevived) {
         if (_powerupHud.consumePowerup(PowerupType.extraLife)) {
           _revivePlayer();
           return;
@@ -480,11 +495,26 @@ class OrbitGame extends FlameGame with TapCallbacks {
   void _applyPowerup(PowerupType type) {
     switch (type) {
       case PowerupType.extraPoints:
-        _addScore(150 * _currentLevel());
+        // Instant bonus — no inventory slot
+        final bonus = 150 * _currentLevel();
+        _addScore(bonus);
+        // Show floating "+150 PTS" (or whatever the bonus is)
+        _showFloating(
+          '+$bonus PTS',
+          const Color(0xFFFFD600),
+          fontSize: 34,
+          riseSpeed: 60,
+        );
         break;
+
       case PowerupType.extraLife:
+        _powerupHud.addPowerup(type);
+        _showFloating('EXTRA LIFE!', const Color(0xFFFF4081), fontSize: 24);
+        break;
+
       case PowerupType.stoneCrasher:
         _powerupHud.addPowerup(type);
+        _showFloating('STONE CRASHER!', const Color(0xFFFF6D00), fontSize: 24);
         break;
     }
   }
@@ -492,13 +522,43 @@ class OrbitGame extends FlameGame with TapCallbacks {
   // ── Extra life revival ────────────────────────────────────────
 
   void _revivePlayer() {
-    _revivedThisRun = true;
+    _justRevived = true; // blocks double-consume within this death event
     _deathTimer = 0;
+
     final planet = _player.currentPlanet ?? _planets.last;
     _player.position = planet.position + Vector2(planet.orbitRadius, 0);
     _player.state = PlayerState.orbiting;
     _player.velocity = Vector2.zero();
     _player.snapToPlanet(planet);
+
+    // Feedback
+    final remaining = _powerupHud.countOf(PowerupType.extraLife);
+    final msg = remaining > 0
+        ? 'LIFE SAVED!  ($remaining left)'
+        : 'LIFE SAVED!';
+    _showFloating(msg, const Color(0xFFFF4081), fontSize: 26);
+  }
+
+  // ── Floating text helper ──────────────────────────────────────
+
+  /// Shows a floating label centred on screen, rising and fading.
+  void _showFloating(
+    String text,
+    Color color, {
+    double fontSize = 26,
+    double riseSpeed = 45,
+    double duration = 1.6,
+  }) {
+    _camera.viewport.add(
+      FloatingTextComponent(
+        position: Vector2(size.x / 2, size.y * 0.48),
+        text: text,
+        color: color,
+        fontSize: fontSize,
+        riseSpeed: riseSpeed,
+        duration: duration,
+      ),
+    );
   }
 
   // ── Helpers ───────────────────────────────────────────────────
@@ -519,6 +579,7 @@ class OrbitGame extends FlameGame with TapCallbacks {
   void _triggerDeath() {
     _player.die();
     _deathTimer = 0;
+    _justRevived = false; // fresh death — allow revival again
     _isTapping = false;
     _powerBar.hide();
   }
@@ -533,9 +594,14 @@ class OrbitGame extends FlameGame with TapCallbacks {
   void _onOrbitComplete(PlanetComponent newPlanet) {
     final newIndex = newPlanet.orbitIndex;
     if (newIndex <= _highestOrbitReached) return;
+
     final orbitsAdvanced = newIndex - _highestOrbitReached;
     _highestOrbitReached = newIndex;
     orbitsCompleted++;
+
+    // Player safely reached a new orbit — allow revival again on next death
+    _justRevived = false;
+
     _addScore(GameConstants.pointsPerOrbit * _currentLevel() * orbitsAdvanced);
   }
 
